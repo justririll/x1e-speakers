@@ -120,22 +120,28 @@ amp_regs() {
 			echo 1 > "$d/command"; echo "${r#*:}" > "$d/num_bytes"; echo 1 > "$d/go"
 			out="$out ${r%:*}:$(sed -n 's/.*val \(0x[0-9a-f]*\).*/\1/p' "$d/read_buffer" | tr '\n' ' ')"
 		done
-		echo "amp ${d##*:}:$out"
+		echo "amp ${d##*:}: $(cat "/sys/bus/soundwire/devices/${d##*/}/status" 2>/dev/null)$out"
 	done 2>/dev/null
 }
 
-# Some speaker power-ups leave the amplifiers without V/I for the whole stream; restarting
-# the capture does not help, powering the speakers down and up does. Suspend the PipeWire
-# speaker sink (as the user owning the playback PCM): it closes the PCM and reopens it.
-SINK=${SINK:-alsa_output.platform-sound.HiFi__Speaker__sink}
+# Some playback starts leave the amplifiers without V/I for the whole stream, sometimes
+# because they dropped off the SoundWire bus (status UNATTACHED, register reads fail).
+# Restarting the capture does not help; letting the bus runtime suspend (clock stop) and
+# resume does, it enumerates the amplifiers again. PipeWire ignores sink suspends while
+# streams play, so switch the card profile off for 5 s (> 3 s SoundWire autosuspend) and
+# back, as the user owning the playback PCM.
 restart_playback() {
 	owner=$(sed -n 's/^owner_pid *: //p' "/proc/asound/card$card/pcm${SPK_PCM}p/sub0/status" 2>/dev/null)
 	[ -n "$owner" ] || return
 	uid=$(stat -c %u "/proc/$owner") || return
 	user=$(stat -c %U "/proc/$owner") || return
-	echo "restarting speaker playback (PipeWire sink suspend as $user)"
-	runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" pactl suspend-sink "$SINK" 1 && sleep 0.5
-	runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" pactl suspend-sink "$SINK" 0
+	pa() { runuser -u "$user" -- env XDG_RUNTIME_DIR="/run/user/$uid" pactl "$@"; }
+	pcard=$(pa list cards short | sed -n 's/^[0-9]*\t\(alsa_card\.platform-sound\)\t.*/\1/p' | head -n 1)
+	prof=$(pa list cards | sed -n 's/^[[:space:]]*Active Profile: //p' | head -n 1)
+	[ -n "$pcard" ] && [ -n "$prof" ] || { echo "no PipeWire card to restart"; return; }
+	echo "restarting speaker playback (card profile off for 5 s as $user)"
+	pa set-card-profile "$pcard" off && sleep 5
+	pa set-card-profile "$pcard" "$prof"
 }
 
 # No V/I data: restart the capture once, then mute and restart the playback, keep retrying

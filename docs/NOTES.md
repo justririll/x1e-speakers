@@ -95,8 +95,13 @@ IID/port, 2 properties `{0x08001062, 8, 1, intent}`, `{0x0800136f, 4, 1}`. Windo
   logged SoundWire parity errors / "Test fail for port 2" / bus clash before VI started, in the
   others nothing. Not a hwmon temperature read race (tested). Cause unknown; the service logs the
   amplifiers' PA FSM / IV sense / interrupt registers on the first failure (`amp N: ...` in the
-  journal; healthy: `0x3435` = 0x2f, `0x3026` = 0x10, `0x3034` = 0x80, errors 0) and recovers by
-  muting and restarting the playback.
+  journal; healthy: `0x3435` = 0x2f, `0x3026` = 0x10, errors 0; `0x3034` varies, e.g. 0x80/0x9c/0xe0)
+  and recovers by muting and restarting the playback.
+- In one such case (a track change) both amplifiers were UNATTACHED on the bus and every register
+  read failed (0x21). They did not come back by themselves, and the bus master stayed active as long
+  as PipeWire kept the PCM running. `pactl suspend-sink` is ignored while streams play. Switching the
+  card profile off for 5 s (longer than the 3 s SoundWire autosuspend) let the master suspend, and
+  on resume both amplifiers were enumerated again. The service now does this.
 - The first speaker stream after boot sometimes had no V/I data before the service waited for the
   playback PCM to be RUNNING (not only prepared) and warmed up the path at boot.
 - Never read LPASS MMIO registers (e.g. via /dev/mem) while no audio stream runs: unclocked

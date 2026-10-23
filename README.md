@@ -55,10 +55,11 @@ Not verified / known issues:
   cone movement. If you hear rattling, buzzing or clicks, turn it down.
 - R0 is not calibrated per unit: the ACDB "safe" values are used, like Windows does without
   calibration. Here that makes the protection see the coils somewhat hotter than they are.
-- Sometimes a playback start leaves the amplifiers without V/I data for the whole stream. Cause
+- Sometimes a playback start (a track change) leaves the amplifiers without V/I data. At least
+  in some cases both amplifiers have dropped off the SoundWire bus (UNATTACHED). Root cause
   unknown, see [Known issues](docs/NOTES.md#known-issues). The service detects it within about
-  a second, mutes, and restarts the playback, so there is a short gap. It also logs the
-  amplifier registers.
+  a second, mutes, and resets the bus by restarting the playback (about 7 s of silence). It also
+  logs the amplifier state.
 - Only the Vivobook S15 S5507QA. Other X1E laptops with WSA884x need their own DT overlay,
   topology and ACDB values. Do not use this tuning on other speakers.
 
@@ -152,7 +153,10 @@ The service checks a 50 ms V/I probe every second. If there is no data (all word
 
 1. It restarts the capture once.
 2. It mutes the speakers (WSA digital volume 0; neither UCM nor PipeWire touches it) and restarts
-   the playback by suspending the PipeWire speaker sink for half a second.
+   the playback: it switches the PipeWire card profile off for 5 s and back. That lets the SoundWire
+   bus runtime suspend, which re-enumerates amplifiers that dropped off the bus. A sink suspend is
+   not enough, because PipeWire ignores it while streams play. Players may pause when the device
+   goes away, so press play again.
 3. When V/I data comes back, it restores the volume. The saved volume is kept in
    `/var/lib/spkr-vi-feedback/` and survives a reboot.
 

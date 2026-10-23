@@ -22,7 +22,7 @@ T_MAX = 80.0
 ALPHA_CU = 0.0039
 FULL_SCALE_V = 13.64
 AVG = 5                     # probes averaged for R
-MIN_V_COUNTS = 0.6 / FULL_SCALE_V * 32768
+MIN_V_COUNTS = 0.3 / FULL_SCALE_V * 32768
 
 
 def probe():
@@ -44,9 +44,9 @@ def probe():
         v = [a - mv for a in v]
         i = [b - mi for b in i]
         vi, ii, vv = sum(a * b for a, b in zip(v, i)), sum(b * b for b in i), sum(a * a for a in v)
-        # Only loud enough probes (V rms > ~0.6 V): on pauses and quiet passages noise and the
-        # speaker impedance away from DC make R jump (seen: 0.2 V fade-out -> "+70 K" in 3 s)
-        ok = vv / n > MIN_V_COUNTS ** 2 and vi > 0.8 * math.sqrt(ii * vv)
+        # Only loud enough, clean probes (V rms > 0.3 V, V/I correlation > 0.95; music gives
+        # 0.97..0.99): on pauses and fade-outs noise makes R jump (seen: "+70 K" in 3 s at 0.2 V)
+        ok = vv / n > MIN_V_COUNTS ** 2 and vi > 0.95 * math.sqrt(ii * vv)
         out.append((vi, ii, vv / n, ok))
     nodata = all(s & 0xffffffff in (0x80008000, 0) for s in w)
     return (None if nodata else out), st.st_mtime
@@ -80,6 +80,8 @@ def main():
                 vrms = math.sqrt(p[c][2]) / 32768 * FULL_SCALE_V
                 warn = ' HOT' if T0 + dt > T_MAX - 10 else '    '
                 cols.append('%5.3f %+5.0fK %4.0fC %5.2f V%s' % (q, dt, T0 + dt, vrms, warn))
+            elif state == 'ok':
+                cols.append('%-31s' % '  quiet (< 0.3 V, no estimate)')
             else:
                 cols.append('%-31s' % ('  -'))
         last = mtime
