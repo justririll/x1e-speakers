@@ -1,0 +1,223 @@
+From 89a197554de87e1ea88d1d4e913b7938e3dc4dd8 Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 21:04:30 +0300
+Subject: [PATCH 63/64] ASoC: qcom: audioreach: add module control links
+
+Some modules talk to each other over control ports instead of data
+ports, e.g. speaker protection VI sends the measured speaker state to
+speaker protection RX (intent 0x08001204). Such links are described by
+APM_PARAM_ID_MODULE_CTRL_LINK_CFG in the graph open command, and the
+peer may live in a graph that is already open.
+
+Add topology tokens to describe one control link per module and send
+the links in GRAPH_OPEN, using the layout of the vendor graphs: an
+intent list property and a second property (0x0800136f) set to 1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ include/uapi/sound/snd_ar_tokens.h |  5 ++++
+ sound/soc/qcom/qdsp6/audioreach.c  | 47 ++++++++++++++++++++++++++++--
+ sound/soc/qcom/qdsp6/audioreach.h  | 35 ++++++++++++++++++++++
+ sound/soc/qcom/qdsp6/topology.c    | 17 +++++++++++
+ 4 files changed, 102 insertions(+), 2 deletions(-)
+
+diff --git a/include/uapi/sound/snd_ar_tokens.h b/include/uapi/sound/snd_ar_tokens.h
+index cf8ab6b..7bc95c4 100644
+--- a/include/uapi/sound/snd_ar_tokens.h
++++ b/include/uapi/sound/snd_ar_tokens.h
+@@ -309,6 +309,11 @@ enum ar_event_types {
+ #define AR_TKN_U16_MODULE_BIT_CLK_TYPE		274
+ #define AR_TKN_U8_MODULE_INV_INT_BIT_CLK	275
+ #define AR_TKN_U8_MODULE_INV_EXT_BIT_CLK	276
++/* Control link from this module's control port to a peer module (may be in another graph) */
++#define AR_TKN_U32_MODULE_CTRL_PORT_ID		277
++#define AR_TKN_U32_MODULE_CTRL_PEER_IID		278
++#define AR_TKN_U32_MODULE_CTRL_PEER_PORT_ID	279
++#define AR_TKN_U32_MODULE_CTRL_INTENT_ID	280
+ 
+ #define AR_AUDIO_IF_SYNC_SRC_EXTERNAL		0
+ #define AR_AUDIO_IF_SYNC_SRC_INTERNAL		1
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index 506e48a..023c7b4 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -482,7 +482,9 @@ static void audioreach_populate_graph(struct q6apm *apm,
+ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+ 				 const struct audioreach_graph_info *info)
+ {
+-	int payload_size, sg_sz, cont_sz, ml_sz, mp_sz, mc_sz;
++	int payload_size, sg_sz, cont_sz, ml_sz, mp_sz, mc_sz, cl_sz = 0;
++	struct apm_mod_ctrl_link_list_params *clist;
++	int num_ctrl_links = 0;
+ 	struct apm_module_param_data  *param_data;
+ 	struct apm_container_params *cont_params;
+ 	struct audioreach_container *container;
+@@ -519,6 +521,8 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+ 
+ 			list_for_each_entry(module, &container->modules_list, node) {
+ 				num_connections += module->num_connections;
++				if (module->ctrl_peer_iid)
++					num_ctrl_links++;
+ 			}
+ 		}
+ 	}
+@@ -532,7 +536,10 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+ 	mp_sz = APM_MOD_PROP_PSIZE(mprop, num_modules);
+ 	mc_sz =	APM_MOD_CONN_PSIZE(mcon, num_connections);
+ 
+-	payload_size = sg_sz + cont_sz + ml_sz + mp_sz + mc_sz;
++	if (num_ctrl_links)
++		cl_sz = ALIGN(struct_size(clist, links, num_ctrl_links), 8);
++
++	payload_size = sg_sz + cont_sz + ml_sz + mp_sz + mc_sz + cl_sz;
+ 	pkt = audioreach_alloc_apm_cmd_pkt(payload_size, APM_CMD_GRAPH_OPEN, 0);
+ 	if (IS_ERR(pkt))
+ 		return pkt;
+@@ -584,6 +591,42 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+ 	params.mod_conn_list_data->num_connections = num_connections;
+ 	p += mc_sz;
+ 
++	/* Module control links */
++	if (num_ctrl_links) {
++		struct apm_module_ctrl_link_cfg *link;
++
++		clist = p;
++		param_data = &clist->param_data;
++		param_data->module_instance_id = APM_MODULE_INSTANCE_ID;
++		param_data->param_id = APM_PARAM_ID_MODULE_CTRL_LINK_CFG;
++		param_data->param_size = cl_sz - APM_MODULE_PARAM_DATA_SIZE;
++		clist->num_ctrl_links = num_ctrl_links;
++		link = clist->links;
++
++		list_for_each_entry(sgs, sg_list, node) {
++			list_for_each_entry(container, &sgs->container_list, node) {
++				list_for_each_entry(module, &container->modules_list, node) {
++					if (!module->ctrl_peer_iid)
++						continue;
++					link->peer_1_mod_iid = module->instance_id;
++					link->peer_1_mod_ctrl_port_id = module->ctrl_port_id;
++					link->peer_2_mod_iid = module->ctrl_peer_iid;
++					link->peer_2_mod_ctrl_port_id = module->ctrl_peer_port_id;
++					link->num_props = 2;
++					link->intent_prop_id = APM_MODULE_PROP_ID_CTRL_LINK_INTENTS;
++					link->intent_prop_size = 8;
++					link->num_intents = 1;
++					link->intent_id = module->ctrl_intent_id;
++					link->prop2_id = APM_MODULE_PROP_ID_CTRL_LINK_0x0800136F;
++					link->prop2_size = 4;
++					link->prop2_value = 1;
++					link++;
++				}
++			}
++		}
++		p += cl_sz;
++	}
++
+ 	audioreach_populate_graph(apm, info, &params, sg_list, num_sub_graphs);
+ 
+ 	return pkt;
+diff --git a/sound/soc/qcom/qdsp6/audioreach.h b/sound/soc/qcom/qdsp6/audioreach.h
+index 35541b2..44a97aa 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.h
++++ b/sound/soc/qcom/qdsp6/audioreach.h
+@@ -160,6 +160,11 @@ struct apm_module_prop_cfg {
+ 
+ #define APM_PARAM_ID_MODULE_CONN		0x08001004
+ 
++#define APM_PARAM_ID_MODULE_CTRL_LINK_CFG	0x08001061
++#define APM_MODULE_PROP_ID_CTRL_LINK_INTENTS	0x08001062
++#define APM_MODULE_PROP_ID_CTRL_LINK_0x0800136F	0x0800136f
++
++
+ struct apm_param_id_module_conn {
+ 	uint32_t num_connections;
+ } __packed;
+@@ -428,6 +433,30 @@ struct apm_module_param_data  {
+ 
+ #define APM_MODULE_PARAM_DATA_SIZE	sizeof(struct apm_module_param_data)
+ 
++/* One control link with an intent list (1 intent) and the second property seen in the
++ * vendor (GSL) graphs, which is always 1.
++ */
++struct apm_module_ctrl_link_cfg {
++	uint32_t peer_1_mod_iid;
++	uint32_t peer_1_mod_ctrl_port_id;
++	uint32_t peer_2_mod_iid;
++	uint32_t peer_2_mod_ctrl_port_id;
++	uint32_t num_props;
++	uint32_t intent_prop_id;
++	uint32_t intent_prop_size;
++	uint32_t num_intents;
++	uint32_t intent_id;
++	uint32_t prop2_id;
++	uint32_t prop2_size;
++	uint32_t prop2_value;
++} __packed;
++
++struct apm_mod_ctrl_link_list_params {
++	struct apm_module_param_data param_data;
++	uint32_t num_ctrl_links;
++	struct apm_module_ctrl_link_cfg links[];
++} __packed;
++
+ struct apm_module_param_shared_data  {
+ 	uint32_t param_id;
+ 	uint32_t param_size;
+@@ -970,6 +999,12 @@ struct audioreach_module {
+ 	/* GAIN/Vol Control Module */
+ 	uint16_t gain;
+ 
++	/* Control link (intent based, e.g. speaker protection VI -> RX) */
++	uint32_t ctrl_port_id;
++	uint32_t ctrl_peer_iid;
++	uint32_t ctrl_peer_port_id;
++	uint32_t ctrl_intent_id;
++
+ 	/* Logging */
+ 	uint32_t log_code;
+ 	uint32_t log_tap_point_id;
+diff --git a/sound/soc/qcom/qdsp6/topology.c b/sound/soc/qcom/qdsp6/topology.c
+index 8ece334..d16491d 100644
+--- a/sound/soc/qcom/qdsp6/topology.c
++++ b/sound/soc/qcom/qdsp6/topology.c
+@@ -448,6 +448,7 @@ static struct audioreach_module *audioreach_parse_common_tokens(struct q6apm *ap
+ 	uint32_t dst_mod_inst_id[AR_MAX_MOD_LINKS] = { 0, };
+ 	uint32_t dst_mod_ip_port_id[AR_MAX_MOD_LINKS] = { 0, };
+ 	uint32_t src_mod_inst_id = 0;
++	uint32_t ctrl_port_id = 0, ctrl_peer_iid = 0, ctrl_peer_port_id = 0, ctrl_intent_id = 0;
+ 
+ 	int module_id = 0, instance_id = 0, tkn_count = 0;
+ 	const struct snd_soc_tplg_vendor_value_elem *mod_elem;
+@@ -561,6 +562,18 @@ static struct audioreach_module *audioreach_parse_common_tokens(struct q6apm *ap
+ 		case AR_TKN_U32_MODULE_DST_IN_PORT_ID7:
+ 			dst_mod_ip_port_id[7] = le32_to_cpu(mod_elem->value);
+ 			break;
++		case AR_TKN_U32_MODULE_CTRL_PORT_ID:
++			ctrl_port_id = le32_to_cpu(mod_elem->value);
++			break;
++		case AR_TKN_U32_MODULE_CTRL_PEER_IID:
++			ctrl_peer_iid = le32_to_cpu(mod_elem->value);
++			break;
++		case AR_TKN_U32_MODULE_CTRL_PEER_PORT_ID:
++			ctrl_peer_port_id = le32_to_cpu(mod_elem->value);
++			break;
++		case AR_TKN_U32_MODULE_CTRL_INTENT_ID:
++			ctrl_intent_id = le32_to_cpu(mod_elem->value);
++			break;
+ 		default:
+ 			break;
+ 
+@@ -576,6 +589,10 @@ static struct audioreach_module *audioreach_parse_common_tokens(struct q6apm *ap
+ 		mod->max_ip_port = max_ip_port;
+ 		mod->max_op_port = max_op_port;
+ 		mod->src_mod_inst_id = src_mod_inst_id;
++		mod->ctrl_port_id = ctrl_port_id;
++		mod->ctrl_peer_iid = ctrl_peer_iid;
++		mod->ctrl_peer_port_id = ctrl_peer_port_id;
++		mod->ctrl_intent_id = ctrl_intent_id;
+ 		for (pn = 0; pn < mod->max_op_port; pn++) {
+ 			if (src_mod_op_port_id[pn] && dst_mod_inst_id[pn] &&
+ 			    dst_mod_ip_port_id[pn]) {
+-- 
+2.56.0
+

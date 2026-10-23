@@ -1,0 +1,47 @@
+From 65406abdf874f9c873ef7fe2da405c4de648d58d Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 21:55:42 +0300
+Subject: [PATCH 64/64] ASoC: qcom: audioreach: fix speaker protection VI
+ channel map
+
+The V/I feedback from WSA884x amplifiers arrives as one 32-bit sample
+per speaker with Isense in the low and Vsense in the high 16 bits. The
+VI module takes the halves in memory order, so the map must list
+Isense first. With [1, 2, 3, 4] the module computes nonsense coil
+resistance (4.7/3.7 Ohm instead of ~7.4 Ohm on Asus Vivobook S15).
+
+Verified in factory test mode: [2, 1, 4, 3] gives 7.44 and 8.20 Ohm
+against 7.35 and 7.57 Ohm R0 from the vendor calibration data.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/qcom/qdsp6/audioreach.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index 023c7b4..75fc909 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -1507,12 +1507,14 @@ static int audioreach_speaker_protection_vi(struct q6apm_graph *graph,
+ 		if (!mcfg->channel_map[i])
+ 			continue;
+ 		/*
+-		 * Map speakers into Vsense and then Isense of each channel.
+-		 * E.g. for PCM_CHANNEL_FL and PCM_CHANNEL_FR to:
+-		 * [1, 2, 3, 4]
++		 * Each 32-bit feedback sample carries Isense in the low and Vsense
++		 * in the high 16 bits (WSA codec DMA V/I feedback), and the module
++		 * reads the halves in memory order. Map them to Isense and then
++		 * Vsense of each speaker, e.g. for PCM_CHANNEL_FL and
++		 * PCM_CHANNEL_FR: [2, 1, 4, 3]
+ 		 */
+-		cm_cfg->cfg.channel_mapping[2 * j] = (mcfg->channel_map[i] - 1) * 2 + 1;
+-		cm_cfg->cfg.channel_mapping[2 * j + 1] = (mcfg->channel_map[i] - 1) * 2 + 2;
++		cm_cfg->cfg.channel_mapping[2 * j] = (mcfg->channel_map[i] - 1) * 2 + 2;
++		cm_cfg->cfg.channel_mapping[2 * j + 1] = (mcfg->channel_map[i] - 1) * 2 + 1;
+ 
+ 		++j;
+ 	}
+-- 
+2.56.0
+

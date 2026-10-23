@@ -1,0 +1,15 @@
+# Keeps the speaker V/I feedback capture running while the speakers play (see the script).
+# Install the script as /usr/local/lib/spkr-vi-feedback.sh; needs alsa-utils, coreutils, grep,
+# sed, util-linux (runuser) and pactl (for the PipeWire playback restart). Runs as root:
+# reads the wsa884x DAPM state and the amplifier registers from debugfs.
+[Unit]
+Description=WSA speaker protection V/I feedback
+After=sound.target sys-kernel-debug.mount
+
+[Service]
+ExecStart=/bin/sh /usr/local/lib/spkr-vi-feedback.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

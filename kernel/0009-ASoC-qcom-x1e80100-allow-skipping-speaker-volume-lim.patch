@@ -1,0 +1,44 @@
+From d98e98433ed64ea57effe7e61e5f108d07bf5cd1 Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 22:18:37 +0300
+Subject: [PATCH 66/66] ASoC: qcom: x1e80100: allow skipping speaker volume
+ limits
+
+The WSA digital and PA volumes are limited to reduce the risk of speaker
+damage without speaker protection. Add a speaker_protection module
+parameter, off by default, for setups whose topology protects the
+speakers in the DSP.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/qcom/x1e80100.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/sound/soc/qcom/x1e80100.c b/sound/soc/qcom/x1e80100.c
+index c81df41..c661c55 100644
+--- a/sound/soc/qcom/x1e80100.c
++++ b/sound/soc/qcom/x1e80100.c
+@@ -23,6 +23,11 @@ struct x1e80100_snd_data {
+ 	bool jack_setup;
+ };
+ 
++/* Set when the topology provides DSP speaker protection for the WSA speakers */
++static bool speaker_protection;
++module_param(speaker_protection, bool, 0444);
++MODULE_PARM_DESC(speaker_protection, "Speakers are protected by the DSP: do not limit WSA volumes");
++
+ static int x1e80100_snd_init(struct snd_soc_pcm_runtime *rtd)
+ {
+ 	struct x1e80100_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+@@ -34,6 +39,8 @@ static int x1e80100_snd_init(struct snd_soc_pcm_runtime *rtd)
+ 	switch (cpu_dai->id) {
+ 	case WSA_CODEC_DMA_RX_0:
+ 	case WSA_CODEC_DMA_RX_1:
++		if (speaker_protection)
++			break;
+ 		/*
+ 		 * Set limit of -3 dB on Digital Volume and 0 dB on PA Volume
+ 		 * to reduce the risk of speaker damage until we have active
+-- 
+2.56.0
+

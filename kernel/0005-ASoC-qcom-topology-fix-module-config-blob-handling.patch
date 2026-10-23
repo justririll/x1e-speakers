@@ -1,0 +1,118 @@
+From e389e178c45c7566ab7ed9f2ad8e616f398d8b2b Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 18:47:54 +0300
+Subject: [PATCH 62/64] ASoC: qcom: topology: fix module config blob handling
+
+The module config element size is the whole element in bytes, header
+included (it is also used to walk to the next vendor array), but it was
+used as a count of 32-bit words when copying, and the payload sent to
+the DSP included 16 bytes past the end of the data.
+
+Copy exactly the element, send only the payload after the header,
+bound-check the element and propagate allocation errors. Send the
+parameters one by one, as calibration blobs such as speaker protection
+tuning do not fit into a single GPR packet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/qcom/qdsp6/audioreach.c | 44 +++++++++++++++++++++++++------
+ sound/soc/qcom/qdsp6/topology.c   | 13 ++++++---
+ 2 files changed, 45 insertions(+), 12 deletions(-)
+
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index 4bc04c2..506e48a 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -837,18 +837,46 @@ static int audioreach_set_module_config(struct q6apm_graph *graph,
+ 					const struct audioreach_module *module,
+ 					const struct audioreach_module_config *cfg)
+ {
+-	int size = le32_to_cpu(module->data->size);
+-	void *p;
++	int size = le32_to_cpu(module->data->size) - sizeof(*module->data);
++	const u8 *data = (const u8 *)module->data->data;
++	int off = 0, rc;
+ 
+-	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
+-	if (IS_ERR(pkt))
+-		return PTR_ERR(pkt);
++	if (size <= 0)
++		return -EINVAL;
+ 
+-	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
++	/*
++	 * The blob is a list of APM_CMD_SET_CFG parameters. Send them one by one:
++	 * calibration blobs (e.g. speaker protection) exceed a single GPR packet.
++	 */
++	while (off < size) {
++		const struct apm_module_param_data *param = (const void *)(data + off);
++		int psize;
+ 
+-	memcpy(p, module->data->data, size);
++		if (size - off < APM_MODULE_PARAM_DATA_SIZE)
++			return -EINVAL;
+ 
+-	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
++		psize = APM_MODULE_PARAM_DATA_SIZE + ALIGN(param->param_size, 8);
++		if (psize > size - off)
++			return -EINVAL;
++
++		struct gpr_pkt *pkt __free(kfree) =
++			audioreach_alloc_apm_cmd_pkt(psize, APM_CMD_SET_CFG, 0);
++		if (IS_ERR(pkt))
++			return PTR_ERR(pkt);
++
++		memcpy((void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE, param, psize);
++
++		rc = q6apm_send_cmd_sync(graph->apm, pkt, 0);
++		if (rc) {
++			dev_err(graph->dev, "module %#x param %#x: set cfg failed (%d)\n",
++				module->instance_id, param->param_id, rc);
++			return rc;
++		}
++
++		off += psize;
++	}
++
++	return 0;
+ }
+ 
+ static int audioreach_mfc_set_media_format(struct q6apm_graph *graph,
+diff --git a/sound/soc/qcom/qdsp6/topology.c b/sound/soc/qcom/qdsp6/topology.c
+index faafbc5..8ece334 100644
+--- a/sound/soc/qcom/qdsp6/topology.c
++++ b/sound/soc/qcom/qdsp6/topology.c
+@@ -316,14 +316,17 @@ audioreach_get_module_priv_data(const struct snd_soc_tplg_private *private)
+ 		mod_array = (struct snd_soc_tplg_vendor_array *)((u8 *)private->array + sz);
+ 		if (le32_to_cpu(mod_array->type) == SND_SOC_AR_TPLG_MODULE_CFG_TYPE) {
+ 			struct audioreach_module_priv_data *pdata;
++			u32 size = le32_to_cpu(mod_array->size);
+ 
+-			pdata = kzalloc_flex(*pdata, data,
+-					     le32_to_cpu(mod_array->size));
++			/* size is the whole element in bytes, header included */
++			if (size < sizeof(*pdata) || sz + size > le32_to_cpu(private->size))
++				return ERR_PTR(-EINVAL);
++
++			pdata = kzalloc(size, GFP_KERNEL);
+ 			if (!pdata)
+ 				return ERR_PTR(-ENOMEM);
+ 
+-			memcpy(pdata, ((u8 *)private->data + sz), struct_size(pdata, data,
+-						le32_to_cpu(mod_array->size)));
++			memcpy(pdata, ((u8 *)private->data + sz), size);
+ 			return pdata;
+ 		}
+ 
+@@ -611,6 +614,8 @@ static int audioreach_widget_load_module_common(struct snd_soc_component *compon
+ 		return mod ? PTR_ERR(mod) : -ENODEV;
+ 
+ 	mod->data = audioreach_get_module_priv_data(&tplg_w->priv);
++	if (IS_ERR(mod->data))
++		return PTR_ERR(mod->data);
+ 
+ 	dobj = &w->dobj;
+ 	dobj->private = mod;
+-- 
+2.56.0
+

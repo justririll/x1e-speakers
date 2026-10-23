@@ -1,0 +1,42 @@
+From 3a0cd50c43374c5b75a2ea55d333f6e53308901d Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 16:51:50 +0300
+Subject: [PATCH 58/64] ASoC: codecs: wsa884x: enable both V and I channels of
+ the VISENSE port
+
+The VISENSE data port carries two channels, voltage and current sense.
+Only channel 0 was enabled, so a VI feedback capture on X1E (Vivobook S15)
+returned a single sense value per speaker and zeros for the other.
+
+Enable both channels so speaker protection gets V and I for each speaker.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/codecs/wsa884x.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/sound/soc/codecs/wsa884x.c b/sound/soc/codecs/wsa884x.c
+index a367c94..3a74a69 100644
+--- a/sound/soc/codecs/wsa884x.c
++++ b/sound/soc/codecs/wsa884x.c
+@@ -858,7 +858,7 @@ static struct sdw_dpn_prop wsa884x_sink_dpn_prop[WSA884X_MAX_SWR_PORTS] = {
+ 		.num = WSA884X_PORT_VISENSE + 1,
+ 		.type = SDW_DPN_SIMPLE,
+ 		.min_ch = 1,
+-		.max_ch = 1,
++		.max_ch = 2,
+ 		.simple_ch_prep_sm = true,
+ 		.read_only_wordlength = true,
+ 	},
+@@ -891,7 +891,7 @@ static const struct sdw_port_config wsa884x_pconfig[WSA884X_MAX_SWR_PORTS] = {
+ 	},
+ 	[WSA884X_PORT_VISENSE] = {
+ 		.num = WSA884X_PORT_VISENSE + 1,
+-		.ch_mask = 0x1,
++		.ch_mask = 0x3,	/* Vsense + Isense */
+ 	},
+ 	[WSA884X_PORT_CPS] = {
+ 		.num = WSA884X_PORT_CPS + 1,
+-- 
+2.56.0
+

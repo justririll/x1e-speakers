@@ -1,0 +1,165 @@
+From 871b1e8cf943e9c47b2e73cd39a7aba3a65c2647 Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 17:21:55 +0300
+Subject: [PATCH 59/64] ASoC: codecs: wsa884x: add V/I sense feedback capture
+ DAI
+
+The VISENSE data port sends voltage and current sense data from the
+amplifier to the host, but it was only described as a sink port and could
+only be switched on inside the speaker playback stream.
+
+Describe VISENSE as a source port and add a "SPKR VI" capture DAI with its
+own TX SoundWire stream, so speaker protection can capture V/I feedback
+through a regular capture link (WSA codec DMA TX + wsa-macro AIF_VI).
+
+The "VISENSE Switch" playback path is left as is and must stay off while
+the VI capture DAI is used.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/codecs/wsa884x.c | 80 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 80 insertions(+)
+
+diff --git a/sound/soc/codecs/wsa884x.c b/sound/soc/codecs/wsa884x.c
+index 3a74a69..a35ea4c 100644
+--- a/sound/soc/codecs/wsa884x.c
++++ b/sound/soc/codecs/wsa884x.c
+@@ -733,6 +733,9 @@ struct wsa884x_priv {
+ 	struct sdw_stream_config sconfig;
+ 	struct sdw_stream_runtime *sruntime;
+ 	struct sdw_port_config port_config[WSA884X_MAX_SWR_PORTS];
++	/* V/I sense feedback, a separate TX (slave to master) stream */
++	struct sdw_stream_config sconfig_vi;
++	struct sdw_stream_runtime *sruntime_vi;
+ 	struct gpio_desc *sd_n;
+ 	struct reset_control *sd_reset;
+ 	bool port_prepared[WSA884X_MAX_SWR_PORTS];
+@@ -872,6 +875,22 @@ static struct sdw_dpn_prop wsa884x_sink_dpn_prop[WSA884X_MAX_SWR_PORTS] = {
+ 	}
+ };
+ 
++static struct sdw_dpn_prop wsa884x_src_dpn_prop[] = {
++	{
++		.num = WSA884X_PORT_VISENSE + 1,
++		.type = SDW_DPN_SIMPLE,
++		.min_ch = 1,
++		.max_ch = 2,
++		.simple_ch_prep_sm = true,
++		.read_only_wordlength = true,
++	},
++};
++
++static const struct sdw_port_config wsa884x_vi_pconfig = {
++	.num = WSA884X_PORT_VISENSE + 1,
++	.ch_mask = 0x3,	/* Vsense + Isense */
++};
++
+ static const struct sdw_port_config wsa884x_pconfig[WSA884X_MAX_SWR_PORTS] = {
+ 	[WSA884X_PORT_DAC] = {
+ 		.num = WSA884X_PORT_DAC + 1,
+@@ -1727,6 +1746,8 @@ static int wsa884x_spkr_event(struct snd_soc_dapm_widget *w,
+ static const struct snd_soc_dapm_widget wsa884x_dapm_widgets[] = {
+ 	SND_SOC_DAPM_INPUT("IN"),
+ 	SND_SOC_DAPM_SPK("SPKR", wsa884x_spkr_event),
++	SND_SOC_DAPM_INPUT("VISENSE"),
++	SND_SOC_DAPM_AIF_OUT("VI OUT", "SPKR VI Capture", 0, SND_SOC_NOPM, 0, 0),
+ };
+ 
+ static const DECLARE_TLV_DB_SCALE(pa_gain, -900, 150, -900);
+@@ -1753,6 +1774,7 @@ static const struct snd_kcontrol_new wsa884x_snd_controls[] = {
+ 
+ static const struct snd_soc_dapm_route wsa884x_audio_map[] = {
+ 	{"SPKR", NULL, "IN"},
++	{"VI OUT", NULL, "VISENSE"},
+ };
+ 
+ static const struct snd_soc_component_driver wsa884x_component_drv = {
+@@ -1833,6 +1855,45 @@ static int wsa884x_set_stream(struct snd_soc_dai *dai,
+ 	return 0;
+ }
+ 
++static int wsa884x_vi_hw_params(struct snd_pcm_substream *substream,
++				struct snd_pcm_hw_params *params,
++				struct snd_soc_dai *dai)
++{
++	struct wsa884x_priv *wsa884x = dev_get_drvdata(dai->dev);
++
++	wsa884x->sconfig_vi.frame_rate = params_rate(params);
++
++	return sdw_stream_add_slave(wsa884x->slave, &wsa884x->sconfig_vi,
++				    &wsa884x_vi_pconfig, 1,
++				    wsa884x->sruntime_vi);
++}
++
++static int wsa884x_vi_hw_free(struct snd_pcm_substream *substream,
++			      struct snd_soc_dai *dai)
++{
++	struct wsa884x_priv *wsa884x = dev_get_drvdata(dai->dev);
++
++	sdw_stream_remove_slave(wsa884x->slave, wsa884x->sruntime_vi);
++
++	return 0;
++}
++
++static int wsa884x_vi_set_stream(struct snd_soc_dai *dai,
++				 void *stream, int direction)
++{
++	struct wsa884x_priv *wsa884x = dev_get_drvdata(dai->dev);
++
++	wsa884x->sruntime_vi = stream;
++
++	return 0;
++}
++
++static const struct snd_soc_dai_ops wsa884x_vi_dai_ops = {
++	.hw_params = wsa884x_vi_hw_params,
++	.hw_free = wsa884x_vi_hw_free,
++	.set_stream = wsa884x_vi_set_stream,
++};
++
+ static const struct snd_soc_dai_ops wsa884x_dai_ops = {
+ 	.hw_params = wsa884x_hw_params,
+ 	.hw_free = wsa884x_hw_free,
+@@ -1855,6 +1916,19 @@ static struct snd_soc_dai_driver wsa884x_dais[] = {
+ 		},
+ 		.ops = &wsa884x_dai_ops,
+ 	},
++	{
++		.name = "SPKR VI",
++		.capture = {
++			.stream_name = "SPKR VI Capture",
++			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_48000,
++			.formats = WSA884X_FORMATS,
++			.rate_min = 8000,
++			.rate_max = 48000,
++			.channels_min = 1,
++			.channels_max = 4,
++		},
++		.ops = &wsa884x_vi_dai_ops,
++	},
+ };
+ 
+ static int wsa884x_get_temp(struct wsa884x_priv *wsa884x, long *temp)
+@@ -2081,6 +2155,10 @@ static int wsa884x_probe(struct sdw_slave *pdev,
+ 	wsa884x->sconfig.bps = 1;
+ 	wsa884x->sconfig.direction = SDW_DATA_DIR_RX;
+ 	wsa884x->sconfig.type = SDW_STREAM_PDM;
++	wsa884x->sconfig_vi.ch_count = 1;
++	wsa884x->sconfig_vi.bps = 1;
++	wsa884x->sconfig_vi.direction = SDW_DATA_DIR_TX;
++	wsa884x->sconfig_vi.type = SDW_STREAM_PDM;
+ 
+ 	/*
+ 	 * Port map index starts with 0, however the data port for this codec
+@@ -2093,6 +2171,8 @@ static int wsa884x_probe(struct sdw_slave *pdev,
+ 	pdev->prop.sink_ports = GENMASK(WSA884X_MAX_SWR_PORTS - 1, 0);
+ 	pdev->prop.simple_clk_stop_capable = true;
+ 	pdev->prop.sink_dpn_prop = wsa884x_sink_dpn_prop;
++	pdev->prop.source_ports = BIT(WSA884X_PORT_VISENSE + 1);
++	pdev->prop.src_dpn_prop = wsa884x_src_dpn_prop;
+ 	pdev->prop.scp_int1_mask = SDW_SCP_INT1_BUS_CLASH | SDW_SCP_INT1_PARITY;
+ 
+ 	wsa884x_reset_deassert(wsa884x);
+-- 
+2.56.0
+

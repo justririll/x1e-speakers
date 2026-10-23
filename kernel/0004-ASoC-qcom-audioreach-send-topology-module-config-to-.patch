@@ -1,0 +1,37 @@
+From 884061b38a99d04f6a2a8a10106ace9259c04e9b Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 18:33:23 +0300
+Subject: [PATCH 61/64] ASoC: qcom: audioreach: send topology module config to
+ any module
+
+The topology can carry a raw APM_CMD_SET_CFG payload per module
+(SND_SOC_AR_TPLG_MODULE_CFG_TYPE), but it is only sent for SMECNS_V2.
+Send it for every module that has one, after the driver's own setup,
+so modules such as speaker protection get their platform calibration.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/qcom/qdsp6/audioreach.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index cce0ad3..4bc04c2 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -1536,6 +1536,13 @@ int audioreach_set_media_format(struct q6apm_graph *graph,
+ 		rc = 0;
+ 	}
+ 
++	/*
++	 * Module tuning from the topology (e.g. speaker protection calibration):
++	 * sent after the driver's own setup so it can override the defaults.
++	 */
++	if (!rc && module->data && module->module_id != MODULE_ID_SMECNS_V2)
++		rc = audioreach_set_module_config(graph, module, cfg);
++
+ 	return rc;
+ }
+ EXPORT_SYMBOL_GPL(audioreach_set_media_format);
+-- 
+2.56.0
+

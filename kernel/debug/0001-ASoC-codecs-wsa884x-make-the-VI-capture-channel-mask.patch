@@ -1,0 +1,57 @@
+From 695a0547f9c038249316308cdf85d481bcbae1c5 Mon Sep 17 00:00:00 2001
+From: Kirill Mitrofanov <kmitrqq@gmail.com>
+Date: Thu, 22 Oct 2026 17:32:25 +0300
+Subject: [PATCH] ASoC: codecs: wsa884x: make the VI capture channel mask
+ tunable (debug)
+
+Bring-up aid: select which VISENSE port channels (Vsense, Isense or both)
+the VI capture DAI enables via the vi_ch_mask module parameter, read at
+hw_params time, so the V/I channel layout can be probed without rebuilds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/soc/codecs/wsa884x.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/sound/soc/codecs/wsa884x.c b/sound/soc/codecs/wsa884x.c
+index a35ea4c..ce49325 100644
+--- a/sound/soc/codecs/wsa884x.c
++++ b/sound/soc/codecs/wsa884x.c
+@@ -886,10 +886,10 @@ static struct sdw_dpn_prop wsa884x_src_dpn_prop[] = {
+ 	},
+ };
+ 
+-static const struct sdw_port_config wsa884x_vi_pconfig = {
+-	.num = WSA884X_PORT_VISENSE + 1,
+-	.ch_mask = 0x3,	/* Vsense + Isense */
+-};
++/* Channels of the VISENSE port used by the VI capture DAI: BIT(0) Vsense, BIT(1) Isense */
++static unsigned int vi_ch_mask = 0x3;
++module_param(vi_ch_mask, uint, 0644);
++MODULE_PARM_DESC(vi_ch_mask, "VISENSE port channel mask for VI capture (1..3)");
+ 
+ static const struct sdw_port_config wsa884x_pconfig[WSA884X_MAX_SWR_PORTS] = {
+ 	[WSA884X_PORT_DAC] = {
+@@ -1860,12 +1860,17 @@ static int wsa884x_vi_hw_params(struct snd_pcm_substream *substream,
+ 				struct snd_soc_dai *dai)
+ {
+ 	struct wsa884x_priv *wsa884x = dev_get_drvdata(dai->dev);
++	struct sdw_port_config pconfig = {
++		.num = WSA884X_PORT_VISENSE + 1,
++		.ch_mask = (vi_ch_mask & 0x3) ?: 0x3,
++	};
+ 
+ 	wsa884x->sconfig_vi.frame_rate = params_rate(params);
++	dev_dbg(dai->dev, "VI capture: rate %u ch_mask %#x\n",
++		params_rate(params), pconfig.ch_mask);
+ 
+ 	return sdw_stream_add_slave(wsa884x->slave, &wsa884x->sconfig_vi,
+-				    &wsa884x_vi_pconfig, 1,
+-				    wsa884x->sruntime_vi);
++				    &pconfig, 1, wsa884x->sruntime_vi);
+ }
+ 
+ static int wsa884x_vi_hw_free(struct snd_pcm_substream *substream,
+-- 
+2.56.0
+
